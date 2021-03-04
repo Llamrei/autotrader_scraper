@@ -122,7 +122,7 @@ while page < max_page:
         ad_idx += 1
 
 
-    if (page - INITIAL_PAGE) % BACKUP_FREQ == 0 and (page - INITIAL_PAGE) > BACKUP_FREQ:
+    if (page - INITIAL_PAGE) % BACKUP_FREQ == 0 and (page - INITIAL_PAGE) >= BACKUP_FREQ:
         print("Backup")
         logging.debug(f'Backing up progress from page {backup_page} to {page}')
         with open(f'data/backup_{backup_page}_{page}.pickle', 'wb') as f:
