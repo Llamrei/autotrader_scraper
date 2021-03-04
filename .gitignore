@@ -1,7 +1,7 @@
 venv
 *.pyc
 
-scraper.log
-page_reached.tmp
-
 data/*
+*.tmp
+*.csv
+*.jpg
