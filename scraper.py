@@ -1,16 +1,15 @@
-import cfscrape
-from bs4 import BeautifulSoup as bs
-from urllib.parse import urljoin
-from urllib.parse import urlparse
-from urllib.parse import parse_qs
-from pathlib import Path
-from datetime import timedelta
-from time import sleep
+import logging
 import pickle as pkl
 import re
 import sys
+from datetime import timedelta
+from pathlib import Path
+from time import sleep
+from urllib.parse import parse_qs, urljoin, urlparse
 
-import logging
+import cfscrape
+from bs4 import BeautifulSoup as bs
+
 logging.basicConfig(filename='scraper.log', encoding='utf-8', filemode='w', level=logging.DEBUG)
 
 # Check for previous run
