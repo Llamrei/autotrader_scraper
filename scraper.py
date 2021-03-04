@@ -1,5 +1,6 @@
 import logging
 import pickle as pkl
+import random
 import re
 import sys
 from logging.handlers import RotatingFileHandler
@@ -9,6 +10,7 @@ from types import new_class
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import cfscrape
+import requests
 from bs4 import BeautifulSoup as bs
 
 rfh = logging.handlers.RotatingFileHandler(
@@ -46,6 +48,7 @@ SORT_KEY = 'relevance'
 GUID_PATTERN = 'window\.AT\.correlationId = "([\w|.|-]+)'
 DELAY = 1 # seconds
 TIMEOUT = 3.05 # seconds
+IMAGES_TO_KEEP = 7
 
 ROOT = 'https://www.autotrader.co.uk'
 JSON_ENDPOINT = urljoin(ROOT, '/json/fpa/initial/')
@@ -56,6 +59,7 @@ SPECS_ENDPOINT = urljoin(ROOT,'/json/taxonomy/technical-specification')
 data = []
 page = INITIAL_PAGE
 backup_page = INITIAL_PAGE
+timeouts = 0
 
 # TODO: Look into using a session that stores cookies?
 scraper = cfscrape.create_scraper()
@@ -72,41 +76,53 @@ while page < max_page:
     ads = soup.body.main.find_all('li', class_='search-page__result')
     ad_idx = 1
     for ad in ads:
-        sleep(max(delay_s,DELAY))
-        status_string = f"\r Page {page}/{max_page} | Ad {ad_idx}/{len(ads)}                      "
-        print(status_string, end='')
-        images = []
-        # Get ad page and price
-        ad_url = ad.find('a', class_='js-click-handler').attrs['href']
-        price = ad.find('div', class_="product-card-pricing__price").find('span').string
-        price_float = float(price.strip('£').replace(',',''))
-        ad_id = ad.attrs['id']
-        ad_page = scraper.get(urljoin(ROOT, ad_url), timeout=TIMEOUT)
-
-        # Get correct params from ad page for API to accept the request to JSON endpoint
-        ad_guid = re.search(GUID_PATTERN, str(ad_page.content)).group(1)
-        details_obj = urlparse(ad_url)
-        params = parse_qs(details_obj.query)
-
-        # Get raw data used to fill in the ad page from JSON endpoint
-        ad_details = scraper.get(urljoin(JSON_ENDPOINT, ad_id), params = {**params, 'guid':ad_guid}, timeout=TIMEOUT)
-        ad_json = ad_details.json()
-        image_urls = ad_json['advert']['imageUrls']
-        for image_url in image_urls:
-            images.append(scraper.get(image_url, timeout=TIMEOUT).content)
-        desc = ad_json['advert']['description']
-        vehicle_data = ad_json['vehicle']
         try:
-            deriv = ad_json['vehicle']['derivativeId']
-            specs = scraper.get(SPECS_ENDPOINT, params={'derivative':deriv, 'channel':'cars'}, timeout=TIMEOUT).json()
-        except KeyError:
-            specs = {'Missing_deriv':True}
+            noise = random.gauss(0,1)
+            sleep(max(delay_s,DELAY) + noise)
+            status_string = f"\r Page {page}/{max_page} | Ad {ad_idx}/{len(ads)}                      "
+            print(status_string, end='')
+            images = []
+            # Get ad page and price
+            ad_url = ad.find('a', class_='js-click-handler').attrs['href']
+            price = ad.find('div', class_="product-card-pricing__price").find('span').string
+            price_float = float(price.strip('£').replace(',',''))
+            ad_id = ad.attrs['id']
+            ad_page = scraper.get(urljoin(ROOT, ad_url), timeout=TIMEOUT)
 
-        # Store relevant data in RAM 
-        data.append({'price':price, 'price_float': price_float, 'description':desc, 'images':images, 'vehicle': vehicle_data, 'specs':specs})
+            # Get correct params from ad page for API to accept the request to JSON endpoint
+            ad_guid = re.search(GUID_PATTERN, str(ad_page.content)).group(1)
+            details_obj = urlparse(ad_url)
+            params = parse_qs(details_obj.query)
+
+            # Get raw data used to fill in the ad page from JSON endpoint
+            ad_details = scraper.get(urljoin(JSON_ENDPOINT, ad_id), params = {**params, 'guid':ad_guid}, timeout=TIMEOUT)
+            ad_json = ad_details.json()
+            image_urls = ad_json['advert']['imageUrls']
+
+            for image_url in image_urls[:IMAGES_TO_KEEP]:
+                images.append(scraper.get(image_url, timeout=TIMEOUT).content)
+
+            desc = ad_json['advert']['description']
+            vehicle_data = ad_json['vehicle']
+            try:
+                deriv = ad_json['vehicle']['derivativeId']
+                specs = scraper.get(SPECS_ENDPOINT, params={'derivative':deriv, 'channel':'cars'}, timeout=TIMEOUT).json()
+            except KeyError:
+                specs = {'Missing_deriv':True}
+
+            # Store relevant data in RAM 
+            data.append({'price':price, 'price_float': price_float, 'description':desc, 'images':images, 'vehicle': vehicle_data, 'specs':specs})
+        except requests.Timeout:
+            err_msg = f"\nTimed out on page {page} ad {ad_idx} - taking a break for 4 seconds and continuing"
+            print(err_msg)
+            logging.error(err_msg)
+            with open('timeouts.csv', 'a') as f:
+                f.write(f'{page},{ad_idx}\n')
+            sleep(4)
         ad_idx += 1
 
-    if (page - INITIAL_PAGE) % BACKUP_FREQ == 0 and page > BACKUP_FREQ:
+
+    if (page - INITIAL_PAGE) % BACKUP_FREQ == 0 and (page - INITIAL_PAGE) > BACKUP_FREQ:
         print("Backup")
         logging.debug(f'Backing up progress from page {backup_page} to {page}')
         with open(f'data/backup_{backup_page}_{page}.pickle', 'wb') as f:
@@ -120,7 +136,8 @@ while page < max_page:
 
     page += 1
     logging.debug('Scraped page - sleeping')
-    sleep(max(2*delay_s,DELAY))
+    noise = random.gauss(1,1)
+    sleep(max(delay_s,DELAY) + noise)
     logging.debug(f'Moving on to scrape page {page}')
     params = {'postcode':'eh42ar', 'page': page, 'sort':SORT_KEY}
     
