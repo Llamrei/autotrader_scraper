@@ -10,10 +10,15 @@ from time import sleep
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import cfscrape
+from numpy.random import default_rng
+rng = default_rng()
 import requests
 from bs4 import BeautifulSoup as bs
 
 #TODO: Run with >1 thread + proxies - would simply segment these partitions i reckon, or split the retrieval of ads
+#TODO: Extract exactly the data we need and tabulate it so we don't have pickled objects
+#TODO: Look into just using the 'https://www.autotrader.co.uk/json/fpa/initial/' endpoint and getting everything we want 
+# from there via a list of ad ids on search page
 #TODO: Look into using a session that stores cookies?
 
 def pairwise(iterable):
@@ -59,7 +64,8 @@ SPECS_ENDPOINT = urljoin(ROOT,'/json/taxonomy/technical-specification')
 
 BODY_TYPES = ['Convertible', 'Hatchback', 'Pickup', 'Coupe', 'Estate', 'MPV', 'SUV', 'Saloon']
 PRICE_POINTS = pairwise(range(0, 500000, 1000))
-SEARCH_PARTITION = product(BODY_TYPES,PRICE_POINTS)
+SEARCH_PARTITION = list(product(PRICE_POINTS,BODY_TYPES))
+# SEARCH_PARTITION = rng.permutation(SEARCH_PARTITION)
 
 data = []
 partition_ad_count = 0
@@ -70,7 +76,7 @@ timeouts = 0
 previous_partitions = []
 
 # Check for previous run
-if Path('partitions_searched.tmp').is_file():
+if Path('partition_reached.tmp').is_file():
     logging.info('Detected previous attempted run - excluding previously searched partitions:')
     with open('partition_reached.tmp', 'r') as f:
         for line in f:
@@ -90,14 +96,14 @@ for body_type, (price_from, price_to) in SEARCH_PARTITION:
         continue
     # Get first search of all ads in our partition
     # we do this outside of the loop to retrieve how many pages we can scrape
+    page = 1
     params = {'postcode':'eh42ar', 'page': page, 'sort':SORT_KEY, 'price-from':price_from, 'price-to':price_to, 'body-type':body_type}
     search_page = scraper.get(SEARCH_ENDPOINT, params=params)
     soup = bs(search_page.content, 'html.parser')
     max_page = int(soup.find('li', class_='paginationMini__count').contents[3].string)
     delay_s = search_page.elapsed.total_seconds()
-    logging.info(f'Starting scrape on page {page}/{max_page}')
-
     while page < max_page and page < 100:
+        logging.info(f'Starting scrape on page {page}/{max_page}')
         ads = soup.body.main.find_all('li', class_='search-page__result')
         ad_idx = 1
         
@@ -105,6 +111,7 @@ for body_type, (price_from, price_to) in SEARCH_PARTITION:
             print(f"\nNo ads for {body_type} £{price_from}-{price_to} page {page}")
         
         for ad in ads:
+            save_data = True
             try:
                 noise = random.gauss(0,1)
                 sleep(max(max(delay_s,DELAY) + noise,1))
@@ -119,30 +126,44 @@ for body_type, (price_from, price_to) in SEARCH_PARTITION:
                 ad_page = scraper.get(urljoin(ROOT, ad_url), timeout=TIMEOUT)
 
                 # Get correct params from ad page for API to accept the request to JSON endpoint
-                ad_guid = re.search(GUID_PATTERN, str(ad_page.content)).group(1)
+                try:
+                    ad_guid = re.search(GUID_PATTERN, str(ad_page.content)).group(1)
+                except AttributeError:
+                    logging.error("Can't regex guid")
+                    ad_idx += 1
+                    continue
                 details_obj = urlparse(ad_url)
                 params = parse_qs(details_obj.query)
 
                 # Get raw data used to fill in the ad page from JSON endpoint
                 ad_details = scraper.get(urljoin(JSON_ENDPOINT, ad_id), params = {**params, 'guid':ad_guid}, timeout=TIMEOUT)
                 ad_json = ad_details.json()
-                image_urls = ad_json['advert']['imageUrls']
+                try:
+                    image_urls = ad_json['advert']['imageUrls']
 
-                for image_url in image_urls[:IMAGES_TO_KEEP]:
-                    images.append(scraper.get(image_url.replace('/%7Bresize%7D/','/'), timeout=TIMEOUT).content)
+                    for image_url in image_urls[:IMAGES_TO_KEEP]:
+                        images.append(scraper.get(image_url.replace('/%7Bresize%7D/','/'), timeout=TIMEOUT).content)
 
-                desc = ad_json['advert']['description']
-                vehicle_data = ad_json['vehicle']
+                    desc = ad_json['advert']['description']
+                except KeyError:
+                    logging.error(f"Missing advert on {status_string}")
+                    save_data = False
+                try:
+                    vehicle_data = ad_json['vehicle']
+                except KeyError:
+                    logging.error(f"Missing vehicle on {status_string}")
+                    save_data = False
                 try:
                     deriv = ad_json['vehicle']['derivativeId']
                     specs = scraper.get(SPECS_ENDPOINT, params={'derivative':deriv, 'channel':'cars'}, timeout=TIMEOUT).json()
                 except KeyError:
-                    specs = {'Missing_deriv':True}
-
-                # Store relevant data in RAM 
-                data.append({'price':price, 'price_float': price_float, 'description':desc, 'images':images, 'vehicle': vehicle_data, 'specs':specs, 'guid':ad_guid})
+                    logging.error(f"Missing deriv on {status_string}")
+                    save_data = False
                 partition_ad_count += 1
                 global_ad_count += 1
+                # Store relevant data in RAM 
+                if save_data:
+                    data.append({'price':price, 'price_float': price_float, 'description':desc, 'images':images, 'vehicle': vehicle_data, 'specs':specs, 'guid':ad_guid})
             except requests.Timeout:
                 err_msg = f"\nTimed out on page {page} ad {ad_idx} - taking a break for 4 seconds and continuing"
                 print(err_msg)
@@ -150,16 +171,22 @@ for body_type, (price_from, price_to) in SEARCH_PARTITION:
                 with open('timeouts.csv', 'a') as f:
                     f.write(f'{page},{ad_idx}\n')
                 sleep(4)
+            except requests.ConnectionError:
+                err_msg = f"\nConnection aborted on page {page} ad {ad_idx} - taking a break for 60 seconds and continuing"
+                print(err_msg)
+                logging.error(err_msg)
+                with open('aborts.csv', 'a') as f:
+                    f.write(f'{page},{ad_idx}\n')
+                sleep(60)
             ad_idx += 1
 
-
-        if (partition_ad_count - previous_backup) >= BACKUP_FREQ:
-            print("Backup")
-            logging.info(f'Backup')
-            with open(f'data/backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
-                pkl.dump(data, f, protocol=pkl.HIGHEST_PROTOCOL)
-                data = []
-                previous_backup = partition_ad_count
+            if (partition_ad_count - previous_backup) >= BACKUP_FREQ:
+                print("Backup")
+                logging.info(f'Backup')
+                with open(f'/mnt/data/car_auction_data/backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
+                    pkl.dump(data, f, protocol=pkl.HIGHEST_PROTOCOL)
+                    data = []
+                    previous_backup = partition_ad_count
 
 
         page += 1
@@ -179,7 +206,7 @@ for body_type, (price_from, price_to) in SEARCH_PARTITION:
 
     print("Partition rounding backup")
     logging.info('Partition rounding backup')
-    with open(f'data/backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
+    with open(f'/mnt/data/car_auction_data/backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
         pkl.dump(data, f, protocol=pkl.HIGHEST_PROTOCOL)
         data = []
         partition_ad_count = 0
