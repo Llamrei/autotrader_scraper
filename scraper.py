@@ -90,7 +90,7 @@ else:
 
 scraper = cfscrape.create_scraper()
 
-for body_type, (price_from, price_to) in SEARCH_PARTITION:
+for (price_from, price_to), body_type in SEARCH_PARTITION:
     if (body_type, (price_from, price_to)) in previous_partitions:
         logging.info(f"Seen partition {body_type} £{price_from}-{price_to} - skipping")
         continue
