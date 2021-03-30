@@ -101,7 +101,7 @@ for (price_from, price_to), body_type in SEARCH_PARTITION:
     params = {'postcode':'eh42ar', 'page': page, 'sort':SORT_KEY, 'price-from':price_from, 'price-to':price_to, 'body-type':body_type}
     search_page = scraper.get(SEARCH_ENDPOINT, params=params)
     soup = bs(search_page.content, 'html.parser')
-    max_page = int(soup.find('li', class_='paginationMini__count').contents[3].string)
+    max_page = int(soup.find('li', class_='paginationMini__count').contents[3].string.replace(",",""))
     delay_s = search_page.elapsed.total_seconds()
     while page < max_page and page < 100:
         logging.info(f'Starting scrape on page {page}/{max_page}')
