@@ -19,7 +19,6 @@ from bs4 import BeautifulSoup as bs
 #TODO: Extract exactly the data we need and tabulate it so we don't have pickled objects
 #TODO: Look into just using the 'https://www.autotrader.co.uk/json/fpa/initial/' endpoint and getting everything we want 
 # from there via a list of ad ids on search page
-#TODO: Look into using a session that stores cookies?
 
 def pairwise(iterable):
     # From https://docs.python.org/3/library/itertools.html#itertools-recipes
@@ -49,7 +48,9 @@ logging.basicConfig(
 sys.setrecursionlimit(50000)
 
 
-BACKUP_FREQ = 130     # ads, rememebr there is ~13 per page
+BACKUP_FREQ = 500     # ads, remember there is ~10 per page
+SAVE_DIR = Path("/mnt/data/car_auction_data")
+
 SORT_KEY = 'relevance'
 GUID_PATTERN = 'window\.AT\.correlationId = "([\w|.|-]+)'
 DELAY = 1 # seconds, minimum delay between a barrage of requests to play nicely
@@ -106,9 +107,18 @@ for (price_from, price_to), body_type in SEARCH_PARTITION:
         logging.info(f'Starting scrape on page {page}/{max_page}')
         ads = soup.body.main.find_all('li', class_='search-page__result')
         ad_idx = 1
-        
+
         if len(ads) == 0:
             print(f"\nNo ads for {body_type} £{price_from}-{price_to} page {page}")
+
+        # Drop ads outside search partition as they pollute search space and can cause duplicates
+        to_drop = []
+        for ad in ads:
+            if (ad.span.string == "Ad") or ("like" in ad.span.string):
+                # Skip ads as they pollute our search space
+                to_drop.append(ad)
+        for ad in to_drop:
+            ads.remove(ad)
         
         for ad in ads:
             save_data = True
@@ -169,21 +179,21 @@ for (price_from, price_to), body_type in SEARCH_PARTITION:
                 print(err_msg)
                 logging.error(err_msg)
                 with open('timeouts.csv', 'a') as f:
-                    f.write(f'{page},{ad_idx}\n')
+                    f.write(f'{body_type}, {price_from}, {price_to}, {page},{ad_idx}\n')
                 sleep(4)
             except requests.ConnectionError:
                 err_msg = f"\nConnection aborted on page {page} ad {ad_idx} - taking a break for 60 seconds and continuing"
                 print(err_msg)
                 logging.error(err_msg)
                 with open('aborts.csv', 'a') as f:
-                    f.write(f'{page},{ad_idx}\n')
+                    f.write(f'{body_type}, {price_from}, {price_to}, {page},{ad_idx}\n')
                 sleep(60)
             ad_idx += 1
 
             if (partition_ad_count - previous_backup) >= BACKUP_FREQ:
                 print("Backup")
                 logging.info(f'Backup')
-                with open(f'/mnt/data/car_auction_data/backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
+                with open(SAVE_DIR / f'backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
                     pkl.dump(data, f, protocol=pkl.HIGHEST_PROTOCOL)
                     data = []
                     previous_backup = partition_ad_count
@@ -194,7 +204,7 @@ for (price_from, price_to), body_type in SEARCH_PARTITION:
         noise = random.gauss(1,1)
         sleep(max(max(delay_s,DELAY) + noise,1))
         logging.info(f'Moving on to scrape page {page}')
-        params = {'postcode':'eh42ar', 'page': page, 'sort':SORT_KEY}
+        params = {'postcode':'eh42ar', 'page': page, 'sort':SORT_KEY, 'price-from':price_from, 'price-to':price_to, 'body-type':body_type}
         
         search_page = scraper.get(SEARCH_ENDPOINT, params=params, timeout=TIMEOUT)
         new_delay = search_page.elapsed.total_seconds()
@@ -206,7 +216,7 @@ for (price_from, price_to), body_type in SEARCH_PARTITION:
 
     print("Partition rounding backup")
     logging.info('Partition rounding backup')
-    with open(f'/mnt/data/car_auction_data/backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
+    with open(SAVE_DIR / f'backup_{body_type}_{price_from}-{price_to}_{previous_backup}_{partition_ad_count}.pickle', 'wb') as f:
         pkl.dump(data, f, protocol=pkl.HIGHEST_PROTOCOL)
         data = []
         partition_ad_count = 0
